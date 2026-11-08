@@ -1,0 +1,171 @@
+========================================================================
+Makefile 逐行解释（User / System 两层结构版）
+========================================================================
+
+CC      := gcc
+BUILD   := build
+    # 编译器、所有 .o/.d 的输出目录
+
+-----------------------------------------------------------------------
+0. 目录布局与入口选择
+-----------------------------------------------------------------------
+
+SYS_DIR      := System          # 系统代码总目录
+APP_INC      := System/App/inc  # 框架头文件（System_config.h 在这里）
+APP_SRC      := System/App/src  # 框架实现
+DS_DIR       := System/Drive/DataStructures   # 练习模块（Calc/List，inc + src）
+LVGL_DIR     := System/Drive/LVGL_GUI         # LVGL 源码
+FREERTOS_DIR := System/Drive/FreeRTOS         # FreeRTOS 内核 + Windows 端口
+
+USER_DIR := User                # 你自己的代码目录
+ENTRY ?= system                 # 入口开关：system（默认）/ user
+
+ifeq ($(ENTRY),user)
+  ENTRY_SRC  := User/main.c
+  USER_EXTRA := $(filter-out $(ENTRY_SRC),$(wildcard $(USER_DIR)/*.c))
+  TARGET     := DeskBoard_user
+else
+  ENTRY_SRC  := System/System_main.c
+  USER_EXTRA :=
+  TARGET     := DeskBoard
+endif
+    # 两个入口各出一个 exe，互不覆盖，所以 make / make user 可以来回切，不用 clean。
+    # USER_EXTRA：User/ 下新增的 .c 自动参与编译（main.c 已单独放进 ENTRY_SRC，要排掉，
+    #             否则同一个 main.c 会被编两次、链两个 main）。
+
+-----------------------------------------------------------------------
+1. 收集源文件
+-----------------------------------------------------------------------
+
+APP_SRCS := $(wildcard $(APP_SRC)/*.c)     # 框架：System/App/src 下一级 .c
+DS_SRCS  := $(wildcard $(DS_DIR)/src/*.c)  # 练习模块
+
+rwildcard  = $(foreach d,$(wildcard $(1:=/*)),\
+             $(call rwildcard,$d,$2) $(filter $(subst *,%,$2),$d))
+LVGL_SRCS := $(call rwildcard,$(LVGL_DIR)/src,*.c)
+    # LVGL 的 .c 分散在 src 下几十个子目录，必须递归收集。
+    # 不用 $(shell find ...)：Windows 上 $(shell) 走 cmd.exe，find 会被解析成
+    # C:\Windows\System32\find.exe（DOS 的字符串查找工具），直接报错。
+    # 这里只用 GNU Make 自己的 wildcard 函数，cmd / bash 行为一致。
+
+RTOS_SRCS := $(wildcard $(FREERTOS_DIR)/src/*.c) \
+             $(FREERTOS_DIR)/portable/MSVC-MingW/port.c \
+             $(FREERTOS_DIR)/portable/MemMang/heap_4.c
+    # FreeRTOS 只编三块：内核核心、Windows 模拟端口、heap_4 内存管理
+    # （System/Drive/FreeRTOS 下没有别的 .c，所以用一级 wildcard 就够）
+
+SRCS := $(ENTRY_SRC) $(USER_EXTRA) $(APP_SRCS) $(DS_SRCS) $(LVGL_SRCS) $(RTOS_SRCS)
+OBJS := $(patsubst %.c,$(BUILD)/%.o,$(SRCS))
+    # .c -> build/ 下同路径的 .o，例如 User/led.c -> build/User/led.o
+
+-----------------------------------------------------------------------
+2. 编译选项
+-----------------------------------------------------------------------
+
+INCLUDES := -I$(APP_INC) -I$(DS_DIR)/inc -I$(USER_DIR) -I$(LVGL_DIR) -I$(LVGL_DIR)/src
+    # -I 是"去哪找头文件"：
+    #   System/App/inc  → System_config.h、lvgl_app.h …
+    #   DataStructures/inc → List.h、Calc.h
+    #   User            → 你自己的 .h（所以能写 #include "led.h"）
+    #   LVGL 根 + src   → lvgl.h 与 LVGL 内部头
+
+RTOS_INCLUDES := -I$(FREERTOS_DIR)/include \
+                 -I$(FREERTOS_DIR)/portable/MSVC-MingW \
+                 -I$(FREERTOS_DIR)
+    # FreeRTOS.h、portmacro.h、FreeRTOSConfig.h 三处
+
+USER_CFLAGS := -std=gnu11 -Wall -g $(INCLUDES) $(RTOS_INCLUDES) \
+               -finput-charset=UTF-8 -fexec-charset=UTF-8
+    # 自己的代码：C11、开全部警告、带调试信息；源码和字符串都按 UTF-8
+    # （UTF-8 是为了界面中文正常；控制台中文由 main 里的 SetConsoleOutputCP 保证）
+
+LVGL_CFLAGS := -std=gnu11 -w -O2 $(INCLUDES) -finput-charset=UTF-8 -fexec-charset=UTF-8
+    # LVGL：-w 关掉第三方库的海量警告，-O2 让软件渲染流畅
+
+RTOS_CFLAGS := -std=gnu11 -w -O2 $(RTOS_INCLUDES) -finput-charset=UTF-8 -fexec-charset=UTF-8
+
+CFLAGS_OF = $(if $(filter $(LVGL_DIR)/%,$<),$(LVGL_CFLAGS),\
+              $(if $(filter $(FREERTOS_DIR)/%,$<),$(RTOS_CFLAGS),$(USER_CFLAGS)))
+    # 按"这个 .c 来自哪个目录"自动挑上面三套选项
+
+DEPFLAGS := -MMD -MP        # 编译时顺便生成 build/xxx.d 头文件依赖
+DEPS     := $(OBJS:.o=.d)   # 依赖文件列表
+    # 有了它，改 System_config.h 会自动重编所有包含它的文件；没有就得 make clean
+
+LDLIBS := -lgdi32 -luser32 -limm32 -lwinmm -static
+    # gdi32 画像素、user32 窗口消息、imm32 输入法
+    # winmm：FreeRTOS 模拟端口用 timeBeginPeriod() 提高定时器精度
+    # -static：把 libgcc/libwinpthread 静态链进去，exe 双击就能跑
+
+-----------------------------------------------------------------------
+3. Windows / POSIX 差异
+-----------------------------------------------------------------------
+
+ifeq ($(OS),Windows_NT)
+  EXE     := .exe
+  winpath  = $(subst /,\,$(patsubst %/,%,$(1)))   # a/b -> a\b，去掉结尾斜杠
+  MKDIR    = if not exist "..." mkdir "..."        # cmd 没有 mkdir -p
+  RMDIR    = if exist "..." rmdir /S /Q "..."
+  RMFILE   = if exist "..." del /Q "..."
+else
+  EXE     :=
+  MKDIR    = mkdir -p "$(1)"
+  RMDIR    = rm -rf "$(1)"
+  RMFILE   = rm -f "$(1)"
+endif
+    # 原来的 @mkdir -p 在 cmd.exe 里会被当成 md -p，多建一个叫 -p 的目录，
+    # 所以这里按平台分开写。
+
+-----------------------------------------------------------------------
+4. 规则
+-----------------------------------------------------------------------
+
+.PHONY: all run clean user
+
+all: $(TARGET)$(EXE)          # 默认目标：make 直接出 exe
+
+$(TARGET)$(EXE): $(OBJS)
+	$(CC) $(OBJS) -o $@ $(LDLIBS)
+    # 把所有 .o 链接成 exe
+
+$(BUILD)/%.o: %.c
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS_OF) $(DEPFLAGS) -c $< -o $@
+    # 模式规则：build/xxx.o 由 xxx.c 编译而来
+    # $@ = 目标(.o)，$< = 第一个依赖(.c)，$^ = 全部依赖
+
+-include $(DEPS)              # 读入头文件依赖；第一次编译时 .d 不存在，所以要 -
+
+run: $(TARGET)$(EXE)
+	$(TARGET)$(EXE)           # 编译并运行当前入口
+
+user:
+	@$(MAKE) ENTRY=user --no-print-directory all
+	@DeskBoard_user$(EXE)
+    # make user = 先用 ENTRY=user 调一次自己编出 DeskBoard_user.exe，
+    #             再直接运行它（窗口关掉后这条命令才结束）
+
+clean:
+	@$(call RMDIR,$(BUILD))
+	@$(call RMFILE,$(TARGET)$(EXE))
+	@$(call RMFILE,DeskBoard.exe)
+	@$(call RMFILE,DeskBoard_user.exe)
+	@echo clean done
+
+========================================================================
+常用命令
+========================================================================
+make -j8        生成 DeskBoard.exe（系统演示）        首次约 1 分钟
+make user       编译 User/main.c 并直接运行（窗口关掉后命令结束）
+make run        编译并运行当前入口
+make clean      清理 build/ 和两个 exe
+
+========================================================================
+想加自己的文件怎么办
+========================================================================
+1) 新 .c 直接丢进 User/            → make user 自动编译，不用改 Makefile
+2) 头文件也放 User/                → #include "xxx.h" 就能找到（-IUser 已加）
+3) 新框架模块放 System/App/src/    → 自动编译；头文件放 System/App/inc/
+4) 只有"新建一个独立模块目录"时才需要改 Makefile：
+     新增一行  XXX_SRCS := $(wildcard System/Drive/XXX/src/*.c)
+     并入 SRCS 里，再加一行 -I System/Drive/XXX/inc

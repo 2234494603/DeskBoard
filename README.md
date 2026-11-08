@@ -40,9 +40,8 @@ System/                    ← 系统提供，一般不用动
 
    `pacman -S --needed mingw-w64-ucrt-x86_64-gcc make`
 
-3. 把 `C:\msys64\ucrt64\bin `
-4. 加进系统 `Path`，**重新打开** PowerShell。
-5. 验证：`gcc --version` 和 `make --version` 都能输出版本号。
+3. 把 `C:\msys64\ucrt64\bin` 加进系统 `Path`，**重新打开** PowerShell。
+4. 验证：`gcc --version` 和 `make --version` 都能输出版本号。
 
 > 本机实际装在 `C:\GCC\msys64`，路径按自己的情况替换。
 
